@@ -29,4 +29,23 @@ services:
     image: redis:7
     container_name: redis
     ports:
-      - "6380:6379"
+      - "6379:6379"
+      
+  producer:
+    build:
+      context: .
+      dockerfile: producer/Dockerfile
+    container_name: producer
+    depends_on:
+      - kafka
+    command: python producer/faker_producer.py
+
+  consumer:
+    build:
+      context: .
+      dockerfile: consumer/Dockerfile
+    container_name: consumer
+    depends_on:
+      - kafka
+      - redis
+    command: python consumer/transactions_consumer.py
