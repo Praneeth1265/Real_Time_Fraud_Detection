@@ -7,7 +7,7 @@ import json
 # -----------------------------
 consumer = KafkaConsumer(
     "transactions",
-    bootstrap_servers="localhost:9092",
+    bootstrap_servers="kafka:9092",
     value_deserializer=lambda v: json.loads(v.decode("utf-8")),
     auto_offset_reset="latest",
     enable_auto_commit=True,
@@ -18,7 +18,7 @@ consumer = KafkaConsumer(
 # Redis Configuration
 # -----------------------------
 r = redis.Redis(
-    host="localhost",
+    host="redis",
     port=6379,   # host-mapped Redis port
     decode_responses=True
 )
