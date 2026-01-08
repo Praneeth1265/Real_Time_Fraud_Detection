@@ -1,80 +1,65 @@
-from kafka import KafkaConsumer
-import redis
 import json
+import redis
+from kafka import KafkaConsumer
+from kafka.errors import NoBrokersAvailable
+import time
 
-# -----------------------------
-# Kafka Consumer Configuration
-# -----------------------------
-consumer = KafkaConsumer(
-    "transactions",
-    bootstrap_servers="kafka:9092",
-    value_deserializer=lambda v: json.loads(v.decode("utf-8")),
-    auto_offset_reset="latest",
-    enable_auto_commit=True,
-    group_id="fraud-consumer-group"
-)
+# ---------------- Configuration ----------------
+KAFKA_BROKER = "kafka:9092"       # container-internal hostname
+TOPIC = "transactions"
+REDIS_HOST = "redis"               # container-internal hostname
+REDIS_PORT = 6379
+FRAUD_THRESHOLD = 5.0              # ratio to trigger alarm
+# ------------------------------------------------
 
-# -----------------------------
-# Redis Configuration
-# -----------------------------
-r = redis.Redis(
-    host="redis",
-    port=6379,   # host-mapped Redis port
-    decode_responses=True
-)
+# Connect to Redis
+r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+
+# Connect to Kafka
+while True:
+    try:
+        consumer = KafkaConsumer(
+	    TOPIC,
+	    bootstrap_servers=["kafka:9092"],
+	    value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+	    auto_offset_reset="earliest",
+	    enable_auto_commit=True,
+	    group_id="fraud_detection_group"
+	)
+        break
+    except NoBrokersAvailable:
+        print("Waiting for Kafka...")
+        time.sleep(5)
 
 print("Listening for transactions...")
 
-# -----------------------------
-# Consume Kafka Messages
-# -----------------------------
 for message in consumer:
     transaction = message.value
-    print(f"Received: {transaction}")
 
     user_id = transaction["user_id"]
-    amount = float(transaction["amount"])
-
     user_key = f"user:{user_id}"
 
-    # -----------------------------
-    # Initialize state for new user
-    # -----------------------------
+    pipe = r.pipeline()
+
     if not r.exists(user_key):
-        r.hset(user_key, mapping={
-            "total_amount": 0.0,
-            "tx_count": 0
-        })
+        pipe.hset(user_key, mapping={"total_amount": 0.0, "tx_count": 0})
 
-    # -----------------------------
-    # Update user state
-    # -----------------------------
-    r.hincrbyfloat(user_key, "total_amount", amount)
-    r.hincrby(user_key, "tx_count", 1)
+    pipe.hincrbyfloat(user_key, "total_amount", transaction["amount"])
+    pipe.hincrby(user_key, "tx_count", 1)
+    pipe.execute()
 
-    # -----------------------------
-    # Fetch updated state
-    # -----------------------------
-    total_amount = float(r.hget(user_key, "total_amount"))
-    tx_count = int(r.hget(user_key, "tx_count"))
+    data = r.hgetall(user_key)
+    total_amount = float(data["total_amount"])
+    tx_count = int(data["tx_count"])
+    avg_amount = total_amount / tx_count
 
-    avg_amount = total_amount / tx_count if tx_count > 0 else 0
-    ratio = amount / avg_amount if avg_amount > 0 else 0
+    ratio = transaction["amount"] / avg_amount if avg_amount > 0 else 0.0
 
-    # -----------------------------
-    # Enriched Output (Fraud Signal)
-    # -----------------------------
-    if ratio > 10:
-        print(
-            f"[ALARM] User {user_id}: "
-            f"Current ${amount:.2f} | "
-            f"Avg ${avg_amount:.2f} | "
-            f"Ratio {ratio:.1f}x | POTENTIAL FRAUD"
-        )
+    if ratio > FRAUD_THRESHOLD:
+        print(f"[ALARM] User {user_id}: Current ${transaction['amount']:.2f} | "
+              f"Avg ${avg_amount:.2f} | Ratio {ratio:.2f}x | POTENTIAL FRAUD")
     else:
-        print(
-            f"[OK] User {user_id}: "
-            f"Current ${amount:.2f} | "
-            f"Avg ${avg_amount:.2f}"
-        )
+        print(f"[OK] User {user_id}: Current ${transaction['amount']:.2f} | "
+              f"Avg ${avg_amount:.2f} | Ratio {ratio:.2f}x")
+
 
