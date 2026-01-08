@@ -9,6 +9,8 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
+    networks:
+      - fraud-net
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
@@ -24,6 +26,8 @@ services:
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - fraud-net
 
 
   redis:
@@ -31,6 +35,8 @@ services:
     container_name: redis
     ports:
       - "6379:6379"
+    networks:
+      - fraud-net
       
   producer:
     build:
@@ -40,6 +46,8 @@ services:
     depends_on:
       - kafka
     command: python producer/faker_producer.py
+    networks:
+      - fraud-net
 
   consumer:
     build:
@@ -50,3 +58,9 @@ services:
       - kafka
       - redis
     command: python consumer/transactions_consumer.py
+    networks:
+      - fraud-net
+    
+networks:
+  fraud-net:
+    driver: bridge

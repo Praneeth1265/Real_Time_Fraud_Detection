@@ -37,7 +37,7 @@ producer = KafkaProducer(
 )
 
 print("Producing fake transactions..")
-TX_PER_SECOND = 10
+TX_PER_SECOND = 100
 
 # Step 3: Produce messages continuously
 while True:
