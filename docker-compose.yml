@@ -60,7 +60,26 @@ services:
     command: python consumer/transactions_consumer.py
     networks:
       - fraud-net
-    
+      
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8
+    container_name: clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    networks:
+      - fraud-net
+
 networks:
   fraud-net:
     driver: bridge
+    
+volumes:
+  clickhouse_data:
+
