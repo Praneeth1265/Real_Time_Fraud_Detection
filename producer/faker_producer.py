@@ -5,12 +5,14 @@ from kafka import KafkaProducer, KafkaAdminClient
 from kafka.admin import NewTopic
 from faker import Faker
 from kafka.errors import KafkaError
+from datetime import datetime
+import random
 
 fake = Faker()
 KAFKA_BROKER = "kafka:9092"
 TOPIC_NAME = "transactions"
+LOCATIONS = ["NY", "LON", "DEL", "BLR", "SFO"]
 
-# Step 0: Wait for Kafka to be ready
 max_retries = 10
 for attempt in range(max_retries):
     try:
@@ -22,7 +24,6 @@ for attempt in range(max_retries):
 else:
     raise Exception("Kafka broker not available after retries")
 
-# Step 1: Create topic dynamically
 topic_list = [NewTopic(name=TOPIC_NAME, num_partitions=1, replication_factor=1)]
 try:
     admin.create_topics(new_topics=topic_list, validate_only=False)
@@ -30,7 +31,6 @@ try:
 except Exception:
     print(f"Topic '{TOPIC_NAME}' already exists")
 
-# Step 2: Create producer
 producer = KafkaProducer(
     bootstrap_servers=KAFKA_BROKER,
     value_serializer=lambda v: json.dumps(v).encode("utf-8")
@@ -39,7 +39,6 @@ producer = KafkaProducer(
 print("Producing fake transactions..")
 TX_PER_SECOND = 100
 
-# Step 3: Produce messages continuously
 while True:
     for _ in range(TX_PER_SECOND):
         user_id = fake.random_int(min=100, max=120)
@@ -48,15 +47,15 @@ while True:
             amount = round(random.uniform(5000, 10000), 2)
 
         transaction = {
-            "user_id": user_id,
-            "amount": amount,
-            "merchant": fake.company(),
-            "location": fake.city(),
-            "timestamp": str(fake.date_time_this_year())
-        }
+	    "user_id": user_id,
+	    "amount": round(random.uniform(10, 1000), 2),
+	    "location": random.choice(LOCATIONS),
+	    "timestamp": datetime.utcnow().isoformat()
+	}
 
         producer.send(TOPIC_NAME, transaction)
         print("Sent:", transaction)
 
     time.sleep(1)
+    
 
