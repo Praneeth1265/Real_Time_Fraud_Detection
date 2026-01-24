@@ -62,33 +62,45 @@ async def process_transaction(msg, r, ch, http_client):
         last_location = data.get("last_location")
 
         # -------- Feature engineering --------
+        MAX_HOURS_CAP = 168.0       # 1 week
+        MAX_DISTANCE_CAP = 2000.0   # km
+        GLOBAL_AVG_AMOUNT = 500.0   # baseline
+        EPS = 1e-6
 
-        # New totals FIRST
-        new_total = total_amount + amount
-        new_count = tx_count + 1
+	# ---------- FIRST TX FLAG ----------
+        is_first_tx = 1 if tx_count == 0 else 0
 
-        # Avg amount
-        avg_amount = new_total / new_count if new_count > 0 else amount
+	# ---------- AVERAGE (NO LEAKAGE) ----------
+        avg_amount = (
+            total_amount / tx_count
+            if tx_count > 0
+            else GLOBAL_AVG_AMOUNT
+        )
 
-        # Location mismatch
-        location_mismatch = 0
-        if last_location and last_location != location:
-            location_mismatch = 1
+	# ---------- LOCATION MISMATCH ----------
+        location_mismatch = int(
+            last_location is not None and last_location != location
+        )
 
-        # Time delta
-        hours_since_last_tx = 999.0
+	# ---------- TIME DELTA ----------
         if last_ts:
-            last_ts = datetime.fromisoformat(last_ts)
-            delta = ts - last_ts
-            hours_since_last_tx = delta.total_seconds() / 3600
+            delta = (ts - datetime.fromisoformat(last_ts)).total_seconds() / 3600
+            hours_since_last_tx = min(max(delta, 1/3600), MAX_HOURS_CAP)
+        else:
+            hours_since_last_tx = MAX_HOURS_CAP / 2  # neutral
 
-        # Distance jump
-        distance_from_last_tx = 0.0
+	# ---------- DISTANCE ----------
         if last_lat and last_lon:
             distance_from_last_tx = haversine(
-                float(last_lat), float(last_lon),
-                lat, lon
-            )
+		float(last_lat), float(last_lon), lat, lon
+	    )
+        else:
+            distance_from_last_tx = MAX_DISTANCE_CAP / 2  # neutral
+
+        distance_from_last_tx = min(distance_from_last_tx, MAX_DISTANCE_CAP)
+
+        new_total = total_amount + amount
+        new_count = tx_count + 1
 
         # -------- Update Redis state --------
         pipe = r.pipeline()
@@ -104,12 +116,14 @@ async def process_transaction(msg, r, ch, http_client):
 
         # -------- Build ML features --------
         features = {
-            "amount": amount,
-            "avg_amount": avg_amount,
-            "distance_from_last_tx": distance_from_last_tx,
-            "hours_since_last_tx": hours_since_last_tx,
-            "location_mismatch": location_mismatch
-        }
+	    "amount": amount,
+	    "avg_amount": amount / (avg_amount + EPS),
+	    "hours_since_last_tx": hours_since_last_tx / MAX_HOURS_CAP,
+	    "distance_from_last_tx": math.log1p(distance_from_last_tx) / math.log1p(MAX_DISTANCE_CAP),
+	    "location_mismatch": location_mismatch,
+	    "is_first_tx": is_first_tx
+	}
+
 
         # -------- Call ML Service (ASYNC, NON-BLOCKING) --------
         try:
@@ -122,7 +136,7 @@ async def process_transaction(msg, r, ch, http_client):
             probability = float(result.get("probability", 0.0))
         except Exception as e:
             print("ML service error TYPE:", type(e))
-    	    print("ML service error REPR:", repr(e))
+            print("ML service error REPR:", repr(e))
             probability = 0.0   # safe fallback
 
         # -------- Decision --------
@@ -147,12 +161,13 @@ async def process_transaction(msg, r, ch, http_client):
                 distance_from_last_tx,
                 hours_since_last_tx,
                 location_mismatch,
+                is_first_tx,
                 probability
             ]],
             column_names=[
                 "user_id", "amount", "location", "lat", "lon", "timestamp",
                 "avg_amount", "distance_from_last_tx", "hours_since_last_tx",
-                "location_mismatch", "fraud_probability"
+                "location_mismatch","is_first_tx", "fraud_probability"
             ]
         )
 
