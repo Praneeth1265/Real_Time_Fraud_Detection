@@ -12,19 +12,23 @@ fake = Faker()
 KAFKA_BROKER = "kafka:9092"
 TOPIC_NAME = "transactions"
 
-LOCATIONS = ["NY", "LON", "DEL", "BLR", "SFO"]
-
-# Real coordinates
+LOCATIONS = ["NY", "LON", "DEL", "BLR", "SFO", "MIA", "CHI", "LA"]
 LOCATION_COORDS = {
     "NY":  (40.7128, -74.0060),
     "LON": (51.5074, -0.1278),
     "DEL": (28.6139, 77.2090),
     "BLR": (12.9716, 77.5946),
-    "SFO": (37.7749, -122.4194)
+    "SFO": (37.7749, -122.4194),
+    "MIA": (25.7617, -80.1918),
+    "CHI": (41.8781, -87.6298),
+    "LA":  (34.0522, -118.2437)
 }
 
-# Store last known location per user (IN PRODUCER MEMORY)
-user_last_location = {}
+MERCHANTS = ["Amazon", "Walmart", "Shell", "Starbucks", "BestBuy", 
+             "Luxury_Store", "Casino", "Foreign_Site", "Electronics_Hub", "Grocery"]
+
+# Track user state (simulating user behavior)
+user_profiles = {}
 
 # ---------------- Kafka Admin ----------------
 max_retries = 10
@@ -51,48 +55,75 @@ producer = KafkaProducer(
     value_serializer=lambda v: json.dumps(v).encode("utf-8")
 )
 
-print("Producing realistic transactions with geo behavior...")
+print("Producing realistic transactions with multi-factor patterns...")
 
 TX_PER_SECOND = 100
 
 while True:
     for _ in range(TX_PER_SECOND):
-
-        user_id = fake.random_int(min=100, max=120)
-
-        # -------- Amount behavior --------
-        if random.random() < 0.05:   # 5% fraud spikes
-            amount = round(random.uniform(5000, 10000), 2)
+        user_id = fake.random_int(min=100, max=150)
+        
+        # Initialize user profile if new
+        if user_id not in user_profiles:
+            user_profiles[user_id] = {
+                'home_location': random.choice(LOCATIONS),
+                'preferred_merchants': random.sample(MERCHANTS, k=random.randint(3, 5)),
+                'last_location': None
+            }
+        
+        user = user_profiles[user_id]
+        
+        # -------- Fraud pattern injection (2% of transactions) --------
+        is_fraud_pattern = random.random() < 0.02
+        
+        if is_fraud_pattern:
+            # Fraudulent behavior
+            amount = round(random.uniform(1000, 8000), 2)
+            merchant = random.choice(["Casino", "Foreign_Site", "Luxury_Store"])
+            location = random.choice([loc for loc in LOCATIONS if loc != user['home_location']])
         else:
-            amount = round(random.uniform(10, 1000), 2)
-
-        # -------- Location behavior --------
-        if user_id not in user_last_location:
-            # First transaction → random location
-            location = random.choice(LOCATIONS)
-        else:
-            # 80% same location, 20% jump city
-            if random.random() < 0.8:
-                location = user_last_location[user_id]
+            # Normal behavior
+            
+            # Merchant selection (70% preferred, 30% random)
+            if random.random() < 0.7:
+                merchant = random.choice(user['preferred_merchants'])
+            else:
+                merchant = random.choice(MERCHANTS)
+            
+            # Amount based on merchant
+            if merchant == "Luxury_Store":
+                amount = round(random.uniform(500, 5000), 2)
+            elif merchant in ["Starbucks", "Shell"]:
+                amount = round(random.uniform(5, 50), 2)
+            else:
+                amount = round(random.uniform(10, 800), 2)
+            
+            # Location (95% home, 5% travel)
+            if random.random() < 0.95:
+                location = user['home_location']
             else:
                 location = random.choice(LOCATIONS)
-
-        # Save last location
-        user_last_location[user_id] = location
-
+        
+        # Update last location
+        user['last_location'] = location
+        
         lat, lon = LOCATION_COORDS[location]
-
+        
         transaction = {
             "user_id": user_id,
             "amount": amount,
+            "merchant": merchant,
             "location": location,
             "lat": lat,
             "lon": lon,
             "timestamp": datetime.utcnow().isoformat()
         }
-
+        
         producer.send(TOPIC_NAME, transaction)
-        print("Sent:", transaction)
-
+        
+        # Less verbose logging
+        if random.random() < 0.01:  # Log 1% of transactions
+            fraud_flag = "FRAUD PATTERN" if is_fraud_pattern else "NORMAL"
+            print(f"{fraud_flag} | User {user_id} | ${amount:.2f} | {merchant} | {location}")
+    
     time.sleep(1)
-
