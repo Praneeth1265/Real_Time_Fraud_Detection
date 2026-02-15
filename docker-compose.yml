@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
@@ -28,7 +26,6 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
     networks:
       - fraud-net
-
 
   redis:
     image: redis:7
@@ -62,13 +59,25 @@ services:
       - fraud-net
       
   ml_service:
-    build: ./ml_service
+    build:
+      context: ./ml_service
+      dockerfile: Dockerfile
     container_name: ml_service
     ports:
       - "8000:8000"
+    volumes:
+      - ./ml_service/fraud_detection_model.json:/app/fraud_model.json:ro
+      - ./ml_service/model_metadata.json:/app/model_metadata.json:ro
     networks:
       - fraud-net
-
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    
   clickhouse:
     image: clickhouse/clickhouse-server:23.8
     container_name: clickhouse
