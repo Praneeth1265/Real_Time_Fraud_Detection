@@ -54,9 +54,12 @@ services:
     depends_on:
       - kafka
       - redis
+      - clickhouse
+      - ml_service
     command: python consumer/transactions_consumer.py
     networks:
       - fraud-net
+    restart: unless-stopped
       
   ml_service:
     build:
@@ -94,10 +97,30 @@ services:
     networks:
       - fraud-net
 
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: grafana
+    depends_on:
+      - clickhouse
+    ports:
+      - "3000:3000"
+    environment:
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - fraud-net
+    restart: unless-stopped
+
 networks:
   fraud-net:
     driver: bridge
-    
+
 volumes:
   clickhouse_data:
+  grafana_data:
 

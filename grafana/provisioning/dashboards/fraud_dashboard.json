@@ -1,0 +1,162 @@
+{
+  "id": null,
+  "uid": "fraud-detection-overview",
+  "title": "Fraud Detection Overview",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total Transactions",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+          "rawSql": "SELECT count() AS total FROM fraud.transactions",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Flagged as Fraud",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+          "rawSql": "SELECT countIf(fraud_probability >= 0.51) AS flagged FROM fraud.transactions",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Fraud Rate (%)",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+          "rawSql": "SELECT round(100.0 * countIf(fraud_probability >= 0.51) / count(), 2) AS fraud_rate FROM fraud.transactions",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Avg Fraud Probability",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+          "rawSql": "SELECT round(avg(fraud_probability), 4) AS avg_probability FROM fraud.transactions",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Transactions per Minute",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+          "rawSql": "SELECT toStartOfMinute(timestamp) AS time, count() AS transactions FROM fraud.transactions WHERE $__timeFilter(timestamp) GROUP BY time ORDER BY time",
+          "format": 0,
+          "queryType": "sql"
+        }
+      ],
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": {}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Avg Fraud Probability per Minute",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+          "rawSql": "SELECT toStartOfMinute(timestamp) AS time, avg(fraud_probability) AS avg_fraud_probability FROM fraud.transactions WHERE $__timeFilter(timestamp) GROUP BY time ORDER BY time",
+          "format": 0,
+          "queryType": "sql"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "options": {}
+    },
+    {
+      "id": 7,
+      "type": "bargauge",
+      "title": "Transactions by Merchant",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+          "rawSql": "SELECT merchant, count() AS transactions FROM fraud.transactions WHERE $__timeFilter(timestamp) GROUP BY merchant ORDER BY transactions DESC",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "displayMode": "gradient", "orientation": "horizontal" }
+    },
+    {
+      "id": 8,
+      "type": "table",
+      "title": "Recent High-Risk Transactions",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+          "rawSql": "SELECT timestamp AS time, user_id, amount, merchant, location, round(fraud_probability, 4) AS fraud_probability FROM fraud.transactions WHERE fraud_probability >= 0.51 ORDER BY timestamp DESC LIMIT 50",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": {}
+    }
+  ]
+}
