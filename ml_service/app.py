@@ -73,6 +73,16 @@ async def predict(tx: Transaction):
     
     # Create DMatrix for XGBoost
     dmatrix = xgb.DMatrix([features], feature_names=feature_columns)
+    print({
+        "distance_from_last_tx": tx.distance_from_last_tx,
+        "distance_from_last_tx_log": tx.distance_from_last_tx_log,
+        "travel_speed": tx.travel_speed,
+        "travel_speed_log": tx.travel_speed_log,
+        "is_impossible_travel": tx.is_impossible_travel,
+        "hours_since_last_tx": tx.hours_since_last_tx
+    })
+
+
     
     # Get prediction (returns probability for class 1)
     probability = float(model.predict(dmatrix)[0])

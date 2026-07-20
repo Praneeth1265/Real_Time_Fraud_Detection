@@ -1,11 +1,12 @@
 import json
 import time
 import random
+import math
 from kafka import KafkaProducer, KafkaAdminClient
 from kafka.admin import NewTopic
-from faker import Faker
 from kafka.errors import KafkaError
-from datetime import datetime
+from faker import Faker
+from datetime import datetime, timedelta
 
 fake = Faker()
 
@@ -24,91 +25,109 @@ LOCATION_COORDS = {
     "LA":  (34.0522, -118.2437)
 }
 
-MERCHANTS = ["Amazon", "Walmart", "Shell", "Starbucks", "BestBuy", 
-             "Luxury_Store", "Casino", "Foreign_Site", "Electronics_Hub", "Grocery"]
-
-# Track user state (simulating user behavior)
-user_profiles = {}
+MERCHANTS = [
+    "Amazon", "Walmart", "Shell", "Starbucks", "BestBuy",
+    "Luxury_Store", "Casino", "Foreign_Site", "Electronics_Hub", "Grocery"
+]
 
 # ---------------- Kafka Admin ----------------
-max_retries = 10
-for attempt in range(max_retries):
+for _ in range(10):
     try:
         admin = KafkaAdminClient(bootstrap_servers=KAFKA_BROKER)
         break
     except KafkaError:
-        print(f"Kafka not ready, retrying {attempt+1}/{max_retries}...")
         time.sleep(2)
 else:
-    raise Exception("Kafka broker not available after retries")
+    raise RuntimeError("Kafka not available")
 
-topic_list = [NewTopic(name=TOPIC_NAME, num_partitions=1, replication_factor=1)]
 try:
-    admin.create_topics(new_topics=topic_list, validate_only=False)
-    print(f"Topic '{TOPIC_NAME}' created successfully")
+    admin.create_topics(
+        [NewTopic(TOPIC_NAME, num_partitions=1, replication_factor=1)]
+    )
 except Exception:
-    print(f"Topic '{TOPIC_NAME}' already exists")
+    pass
 
-# ---------------- Producer ----------------
 producer = KafkaProducer(
     bootstrap_servers=KAFKA_BROKER,
     value_serializer=lambda v: json.dumps(v).encode("utf-8")
 )
 
-print("Producing realistic transactions with multi-factor patterns...")
+# ---------------- User State ----------------
+user_profiles = {}
 
-TX_PER_SECOND = 100
+TX_PER_SECOND = 50
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dl/2)**2
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+print("Producing realistic transactions...")
 
 while True:
+    now = datetime.utcnow()
+
     for _ in range(TX_PER_SECOND):
-        user_id = fake.random_int(min=100, max=150)
-        
-        # Initialize user profile if new
+        user_id = random.randint(100, 150)
+
         if user_id not in user_profiles:
+            home = random.choice(LOCATIONS)
             user_profiles[user_id] = {
-                'home_location': random.choice(LOCATIONS),
-                'preferred_merchants': random.sample(MERCHANTS, k=random.randint(3, 5)),
-                'last_location': None
+                "home": home,
+                "lat": LOCATION_COORDS[home][0],
+                "lon": LOCATION_COORDS[home][1],
+                "last_ts": now - timedelta(hours=random.uniform(1, 72)),
+                "preferred_merchants": random.sample(MERCHANTS, 4)
             }
-        
+
         user = user_profiles[user_id]
-        
-        # -------- Fraud pattern injection (2% of transactions) --------
-        is_fraud_pattern = random.random() < 0.02
-        
-        if is_fraud_pattern:
-            # Fraudulent behavior
-            amount = round(random.uniform(1000, 8000), 2)
+
+        # Time progression (2s – 30min)
+        delta_seconds = random.uniform(2, 1800)
+        timestamp = user["last_ts"] + timedelta(seconds=delta_seconds)
+
+        # Decide fraud
+        is_fraud = random.random() < 0.02
+
+        if is_fraud:
+            # Impossible travel
+            location = random.choice([l for l in LOCATIONS if l != user["home"]])
+            lat, lon = LOCATION_COORDS[location]
             merchant = random.choice(["Casino", "Foreign_Site", "Luxury_Store"])
-            location = random.choice([loc for loc in LOCATIONS if loc != user['home_location']])
+            amount = round(random.uniform(1000, 8000), 2)
         else:
             # Normal behavior
-            
-            # Merchant selection (70% preferred, 30% random)
-            if random.random() < 0.7:
-                merchant = random.choice(user['preferred_merchants'])
-            else:
-                merchant = random.choice(MERCHANTS)
-            
-            # Amount based on merchant
+            merchant = (
+                random.choice(user["preferred_merchants"])
+                if random.random() < 0.7
+                else random.choice(MERCHANTS)
+            )
+
             if merchant == "Luxury_Store":
                 amount = round(random.uniform(500, 5000), 2)
             elif merchant in ["Starbucks", "Shell"]:
                 amount = round(random.uniform(5, 50), 2)
             else:
                 amount = round(random.uniform(10, 800), 2)
-            
-            # Location (95% home, 5% travel)
-            if random.random() < 0.95:
-                location = user['home_location']
-            else:
+
+            # Travel only if enough time passed
+            if random.random() < 0.05:
                 location = random.choice(LOCATIONS)
-        
-        # Update last location
-        user['last_location'] = location
-        
-        lat, lon = LOCATION_COORDS[location]
-        
+            else:
+                location = user["home"]
+
+            lat, lon = LOCATION_COORDS[location]
+
+            # Reject unrealistic normal travel
+            dist = haversine(user["lat"], user["lon"], lat, lon)
+            hours = delta_seconds / 3600
+            if hours > 0 and dist / hours > 1200:
+                lat, lon = user["lat"], user["lon"]
+                location = user["home"]
+
         transaction = {
             "user_id": user_id,
             "amount": amount,
@@ -116,14 +135,19 @@ while True:
             "location": location,
             "lat": lat,
             "lon": lon,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": timestamp.isoformat()
         }
-        
+
         producer.send(TOPIC_NAME, transaction)
-        
-        # Less verbose logging
-        if random.random() < 0.01:  # Log 1% of transactions
-            fraud_flag = "FRAUD PATTERN" if is_fraud_pattern else "NORMAL"
-            print(f"{fraud_flag} | User {user_id} | ${amount:.2f} | {merchant} | {location}")
-    
+
+        # Update state
+        user["lat"] = lat
+        user["lon"] = lon
+        user["last_ts"] = timestamp
+
+        if random.random() < 0.01:
+            tag = "FRAUD" if is_fraud else "NORMAL"
+            print(f"{tag} | User {user_id} | ${amount:.2f} | {merchant} | {location}")
+
     time.sleep(1)
+
