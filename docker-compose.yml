@@ -1,15 +1,31 @@
 services:
+  # Heap sizes below are deliberately small -- this stack runs 15 containers
+  # (3 JVMs here + ClickHouse + Grafana + 8 Python services) and the host has
+  # very limited RAM. Confluent's images default Kafka's/ZK's JVM heap much
+  # higher, which was enough to get Kafka OOM-killed under the combined
+  # footprint during validation. Demo-scale throughput needs nowhere near
+  # the defaults. kafka-2 (added for replication_factor=2) roughly doubles
+  # Kafka's own footprint on top of that -- watch for OOM kills if the host
+  # is still as memory-constrained as it was during the original validation.
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
+      KAFKA_HEAP_OPTS: "-Xmx256M -Xms256M"
     ports:
       - "2181:2181"
+    mem_limit: 384m
     networks:
       - fraud-net
 
+  # Two brokers so each topic partition can be replicated (replication_factor=2
+  # below) onto a second broker -- if either kafka or kafka-2 dies, the other
+  # still holds a full copy of every partition and producers/consumers (which
+  # bootstrap against BOTH brokers, see KAFKA_BROKER below) keep working.
+  # ZooKeeper itself remains a single point of failure regardless -- this is
+  # broker/data-level fault tolerance only, not coordination-layer HA.
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     container_name: kafka
@@ -23,7 +39,49 @@ services:
 
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 2
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms512M"
+    mem_limit: 768m
+    networks:
+      - fraud-net
+
+  kafka-2:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-2
+    depends_on:
+      - zookeeper
+    ports:
+      - "9093:9092"
+    environment:
+      KAFKA_BROKER_ID: 2
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 2
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 2
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms512M"
+    mem_limit: 768m
+    networks:
+      - fraud-net
+
+  # One-shot: creates transactions.raw / transactions.features / ground_truth,
+  # each with 2 partitions and replication_factor=2, before any producer/
+  # consumer starts. Everything downstream gates on this completing
+  # successfully rather than relying on Kafka's default auto-create (which
+  # would give 1 partition, defeating the point of the 2-instance consumer
+  # groups below).
+  kafka-init:
+    build:
+      context: ./kafka_init
+      dockerfile: Dockerfile
+    container_name: kafka-init
+    depends_on:
+      - kafka
+      - kafka-2
+    environment:
+      KAFKA_BROKER: kafka:9092,kafka-2:9092
     networks:
       - fraud-net
 
@@ -34,53 +92,7 @@ services:
       - "6379:6379"
     networks:
       - fraud-net
-      
-  producer:
-    build:
-      context: .
-      dockerfile: producer/Dockerfile
-    container_name: producer
-    depends_on:
-      - kafka
-    command: python producer/faker_producer.py
-    networks:
-      - fraud-net
 
-  consumer:
-    build:
-      context: .
-      dockerfile: consumer/Dockerfile
-    container_name: consumer
-    depends_on:
-      - kafka
-      - redis
-      - clickhouse
-      - ml_service
-    command: python consumer/transactions_consumer.py
-    networks:
-      - fraud-net
-    restart: unless-stopped
-      
-  ml_service:
-    build:
-      context: ./ml_service
-      dockerfile: Dockerfile
-    container_name: ml_service
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./ml_service/fraud_detection_model.json:/app/fraud_model.json:ro
-      - ./ml_service/model_metadata.json:/app/model_metadata.json:ro
-    networks:
-      - fraud-net
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-    restart: unless-stopped
-    
   clickhouse:
     image: clickhouse/clickhouse-server:23.8
     container_name: clickhouse
@@ -94,6 +106,7 @@ services:
       nofile:
         soft: 262144
         hard: 262144
+    mem_limit: 768m
     networks:
       - fraud-net
 
@@ -112,6 +125,198 @@ services:
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning
+    mem_limit: 256m
+    networks:
+      - fraud-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------
+  # Transaction Producers (x2) -- plain Kafka producers, no consumer group.
+  # Publish to transactions.raw AND (after a simulated confirmation delay)
+  # directly to ground_truth -- see producer/faker_producer.py for why a
+  # separate "ground truth producer" service would just be pointless
+  # indirection here.
+  # ---------------------------------------------------------------------
+  producer-1:
+    build:
+      context: ./producer
+      dockerfile: Dockerfile
+    container_name: producer-1
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKER: kafka:9092,kafka-2:9092
+      TOPIC_RAW: transactions.raw
+      TOPIC_GROUND_TRUTH: ground_truth
+      INSTANCE_ID: producer-1
+      TX_PER_SECOND: "12"
+      GT_DELAY_MIN_SECONDS: "5"
+      GT_DELAY_MAX_SECONDS: "30"
+      USER_ID_MIN: "100"
+      USER_ID_MAX: "124"
+    networks:
+      - fraud-net
+    restart: unless-stopped
+
+  producer-2:
+    build:
+      context: ./producer
+      dockerfile: Dockerfile
+    container_name: producer-2
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKER: kafka:9092,kafka-2:9092
+      TOPIC_RAW: transactions.raw
+      TOPIC_GROUND_TRUTH: ground_truth
+      INSTANCE_ID: producer-2
+      TX_PER_SECOND: "12"
+      GT_DELAY_MIN_SECONDS: "5"
+      GT_DELAY_MAX_SECONDS: "30"
+      USER_ID_MIN: "125"
+      USER_ID_MAX: "150"
+    networks:
+      - fraud-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------
+  # Feature Engineering Service (x2) -- consumer group: feature-service-group
+  # transactions.raw -> (Redis-backed per-user features) -> transactions.features
+  # ---------------------------------------------------------------------
+  feature-service-1:
+    build:
+      context: .
+      dockerfile: feature_service/Dockerfile
+    container_name: feature-service-1
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    environment:
+      KAFKA_BROKER: kafka:9092,kafka-2:9092
+      TOPIC_RAW: transactions.raw
+      TOPIC_FEATURES: transactions.features
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      INSTANCE_ID: feature-service-1
+    networks:
+      - fraud-net
+    restart: unless-stopped
+
+  feature-service-2:
+    build:
+      context: .
+      dockerfile: feature_service/Dockerfile
+    container_name: feature-service-2
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+    environment:
+      KAFKA_BROKER: kafka:9092,kafka-2:9092
+      TOPIC_RAW: transactions.raw
+      TOPIC_FEATURES: transactions.features
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      INSTANCE_ID: feature-service-2
+    networks:
+      - fraud-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------
+  # ML Inference Service (x2) -- consumer group: ml-service-group
+  # transactions.features -> XGBoost (in-process, no REST) -> fraud.predictions
+  # ---------------------------------------------------------------------
+  ml-service-1:
+    build:
+      context: ./ml_service
+      dockerfile: Dockerfile
+    container_name: ml-service-1
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_started
+    environment:
+      KAFKA_BROKER: kafka:9092,kafka-2:9092
+      TOPIC_FEATURES: transactions.features
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      INSTANCE_ID: ml-service-1
+    volumes:
+      - ./ml_service/fraud_detection_model.json:/app/fraud_model.json:ro
+      - ./ml_service/model_metadata.json:/app/model_metadata.json:ro
+    networks:
+      - fraud-net
+    restart: unless-stopped
+
+  ml-service-2:
+    build:
+      context: ./ml_service
+      dockerfile: Dockerfile
+    container_name: ml-service-2
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_started
+    environment:
+      KAFKA_BROKER: kafka:9092,kafka-2:9092
+      TOPIC_FEATURES: transactions.features
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      INSTANCE_ID: ml-service-2
+    volumes:
+      - ./ml_service/fraud_detection_model.json:/app/fraud_model.json:ro
+      - ./ml_service/model_metadata.json:/app/model_metadata.json:ro
+    networks:
+      - fraud-net
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------
+  # Evaluation Service (x2) -- consumer group: evaluation-service-group
+  # ground_truth -> lookup fraud.predictions by transaction_id -> fraud.evaluation
+  # ---------------------------------------------------------------------
+  evaluation-service-1:
+    build:
+      context: ./evaluation_service
+      dockerfile: Dockerfile
+    container_name: evaluation-service-1
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_started
+    environment:
+      KAFKA_BROKER: kafka:9092,kafka-2:9092
+      TOPIC_GROUND_TRUTH: ground_truth
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      INSTANCE_ID: evaluation-service-1
+    networks:
+      - fraud-net
+    restart: unless-stopped
+
+  evaluation-service-2:
+    build:
+      context: ./evaluation_service
+      dockerfile: Dockerfile
+    container_name: evaluation-service-2
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_started
+    environment:
+      KAFKA_BROKER: kafka:9092,kafka-2:9092
+      TOPIC_GROUND_TRUTH: ground_truth
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      INSTANCE_ID: evaluation-service-2
     networks:
       - fraud-net
     restart: unless-stopped
@@ -123,4 +328,3 @@ networks:
 volumes:
   clickhouse_data:
   grafana_data:
-

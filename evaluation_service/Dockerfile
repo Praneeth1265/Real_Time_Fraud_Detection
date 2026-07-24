@@ -9,4 +9,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["python", "consumer/transactions_consumer.py"]
+CMD ["python", "evaluation_service.py"]

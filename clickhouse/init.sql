@@ -2,60 +2,38 @@ CREATE DATABASE IF NOT EXISTS fraud;
 
 USE fraud;
 
-CREATE TABLE IF NOT EXISTS transactions
+-- Point-lookup-optimized: the evaluation service does WHERE transaction_id = ?
+-- very frequently (once per ground-truth message). transaction_id must be the
+-- leading ORDER BY column, or every lookup scans the whole table. No
+-- time-based PARTITION BY -- nothing here queries by time range.
+CREATE TABLE IF NOT EXISTS predictions
 (
-    user_id Int32,
-    amount Float64,
-    merchant String,
-    location String,
-    lat Float64,
-    lon Float64,
-    timestamp DateTime,
-    
-    -- Amount features
-    amount_log Float64,
-    amount_zscore Float64,
-    amount_ratio_to_avg Float64,
-    is_round_amount UInt8,
-    is_very_high UInt8,
-    
-    -- Time features
-    hour UInt8,
-    day_of_week UInt8,
-    is_weekend UInt8,
-    is_night UInt8,
-    hours_since_last_tx Float64,
-    hours_since_last_tx_log Float64,
-    is_rapid_tx UInt8,
-    
-    -- Velocity features
-    tx_count_1h UInt16,
-    tx_count_24h UInt16,
-    total_tx_count UInt32,
-    is_first_tx UInt8,
-    
-    -- Location features
-    location_mismatch_home UInt8,
-    location_mismatch_last UInt8,
-    distance_from_last_tx Float64,
-    distance_from_last_tx_log Float64,
-    travel_speed Float64,
-    travel_speed_log Float64,
-    is_impossible_travel UInt8,
-    location_frequency Float64,
-    is_new_location UInt8,
-    
-    -- Merchant features
-    merchant_risk UInt8,
-    merchant_frequency Float64,
-    is_new_merchant UInt8,
-    
-    -- Prediction
+    transaction_id    String,
+    timestamp         DateTime,
+    merchant          String,
+    amount            Float64,
     fraud_probability Float64,
-    
-    -- Metadata
-    processed_at DateTime DEFAULT now()
+    predicted_label   UInt8,
+    processed_at      DateTime DEFAULT now()
 )
 ENGINE = MergeTree()
-ORDER BY (timestamp, user_id)
+ORDER BY (transaction_id);
+
+-- Time-range-optimized: Grafana only does WHERE $__timeFilter(timestamp)
+-- GROUP BY ... aggregates against this table.
+CREATE TABLE IF NOT EXISTS evaluation
+(
+    transaction_id     String,
+    timestamp          DateTime,
+    merchant           String,
+    amount             Float64,
+    predicted_label    UInt8,
+    actual_label       UInt8,
+    fraud_probability  Float64,
+    correct_prediction UInt8,
+    classification     LowCardinality(String),   -- 'TP' / 'TN' / 'FP' / 'FN'
+    evaluated_at        DateTime DEFAULT now()
+)
+ENGINE = MergeTree()
+ORDER BY (timestamp, transaction_id)
 PARTITION BY toYYYYMM(timestamp);

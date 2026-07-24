@@ -4,21 +4,22 @@
   "title": "Fraud Detection Overview",
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "10s",
-  "time": { "from": "now-1h", "to": "now" },
+  "time": { "from": "now-7d", "to": "now+7d" },
   "panels": [
     {
       "id": 1,
       "type": "stat",
-      "title": "Total Transactions",
-      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "title": "Prediction Count (all-time)",
+      "description": "Total predictions ever evaluated (cumulative, not time-range scoped).",
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 0 },
       "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
       "targets": [
         {
           "refId": "A",
           "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
-          "rawSql": "SELECT count() AS total FROM fraud.transactions",
+          "rawSql": "SELECT count() AS total FROM fraud.evaluation",
           "format": 1,
           "queryType": "sql"
         }
@@ -29,14 +30,180 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "Flagged as Fraud",
-      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "title": "Evaluation Count (time range)",
+      "description": "Evaluated transactions within the selected dashboard time range.",
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 0 },
       "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
       "targets": [
         {
           "refId": "A",
           "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
-          "rawSql": "SELECT countIf(fraud_probability >= 0.51) AS flagged FROM fraud.transactions",
+          "rawSql": "SELECT count() AS total FROM fraud.evaluation WHERE $__timeFilter(timestamp)",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Fraud Rate (%)",
+      "description": "Real, ground-truth fraud rate (actual_label = 1), not a model-flag proxy.",
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 0 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+          "rawSql": "SELECT round(100.0 * countIf(actual_label = 1) / count(), 2) AS fraud_rate FROM fraud.evaluation WHERE $__timeFilter(timestamp)",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Accuracy (%)",
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 0 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+          "rawSql": "SELECT round(100.0 * avg(correct_prediction), 2) AS accuracy FROM fraud.evaluation WHERE $__timeFilter(timestamp)",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Precision (%)",
+      "description": "Of everything predicted fraud, what fraction actually was.",
+      "gridPos": { "h": 5, "w": 4, "x": 16, "y": 0 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+          "rawSql": "SELECT round(100.0 * countIf(classification = 'TP') / nullIf(countIf(classification = 'TP') + countIf(classification = 'FP'), 0), 2) AS precision FROM fraud.evaluation WHERE $__timeFilter(timestamp)",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Recall (%)",
+      "description": "Of all actual fraud, what fraction the model caught.",
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 0 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+          "rawSql": "SELECT round(100.0 * countIf(classification = 'TP') / nullIf(countIf(classification = 'TP') + countIf(classification = 'FN'), 0), 2) AS recall FROM fraud.evaluation WHERE $__timeFilter(timestamp)",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "True Positives",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 5 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+          "rawSql": "SELECT countIf(classification = 'TP') AS tp FROM fraud.evaluation WHERE $__timeFilter(timestamp)",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "True Negatives",
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 5 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+          "rawSql": "SELECT countIf(classification = 'TN') AS tn FROM fraud.evaluation WHERE $__timeFilter(timestamp)",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "False Positives",
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 5 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+          "rawSql": "SELECT countIf(classification = 'FP') AS fp FROM fraud.evaluation WHERE $__timeFilter(timestamp)",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "False Negatives",
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 5 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+          "rawSql": "SELECT countIf(classification = 'FN') AS fn FROM fraud.evaluation WHERE $__timeFilter(timestamp)",
           "format": 1,
           "queryType": "sql"
         }
@@ -51,52 +218,17 @@
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
     },
     {
-      "id": 3,
-      "type": "stat",
-      "title": "Fraud Rate (%)",
-      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
-          "rawSql": "SELECT round(100.0 * countIf(fraud_probability >= 0.51) / count(), 2) AS fraud_rate FROM fraud.transactions",
-          "format": 1,
-          "queryType": "sql"
-        }
-      ],
-      "fieldConfig": { "defaults": { "unit": "percent", "color": { "mode": "thresholds" } }, "overrides": [] },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
-    },
-    {
-      "id": 4,
-      "type": "stat",
-      "title": "Avg Fraud Probability",
-      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
-          "rawSql": "SELECT round(avg(fraud_probability), 4) AS avg_probability FROM fraud.transactions",
-          "format": 1,
-          "queryType": "sql"
-        }
-      ],
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" } }, "overrides": [] },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area" }
-    },
-    {
-      "id": 5,
+      "id": 11,
       "type": "timeseries",
-      "title": "Transactions per Minute",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "title": "Transactions/sec (Evaluated)",
+      "description": "Evaluated (ground-truth-confirmed) throughput. Lags raw ingestion by the configured confirmation delay (default 5-30s) -- this is not raw producer throughput.",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 10 },
       "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
       "targets": [
         {
           "refId": "A",
           "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
-          "rawSql": "SELECT toStartOfMinute(timestamp) AS time, count() AS transactions FROM fraud.transactions WHERE $__timeFilter(timestamp) GROUP BY time ORDER BY time",
+          "rawSql": "SELECT toStartOfMinute(timestamp) AS time, count() / 60.0 AS transactions_per_sec FROM fraud.evaluation WHERE $__timeFilter(timestamp) GROUP BY time ORDER BY time",
           "format": 0,
           "queryType": "sql"
         }
@@ -105,58 +237,59 @@
       "options": {}
     },
     {
-      "id": 6,
+      "id": 12,
       "type": "timeseries",
-      "title": "Avg Fraud Probability per Minute",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "title": "Predicted Frauds/sec",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 10 },
       "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
       "targets": [
         {
           "refId": "A",
           "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
-          "rawSql": "SELECT toStartOfMinute(timestamp) AS time, avg(fraud_probability) AS avg_fraud_probability FROM fraud.transactions WHERE $__timeFilter(timestamp) GROUP BY time ORDER BY time",
+          "rawSql": "SELECT toStartOfMinute(timestamp) AS time, countIf(predicted_label = 1) / 60.0 AS predicted_frauds_per_sec FROM fraud.evaluation WHERE $__timeFilter(timestamp) GROUP BY time ORDER BY time",
           "format": 0,
           "queryType": "sql"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
       "options": {}
     },
     {
-      "id": 7,
-      "type": "bargauge",
-      "title": "Transactions by Merchant",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "id": 13,
+      "type": "timeseries",
+      "title": "Confirmed Frauds/sec",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 10 },
       "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
       "targets": [
         {
           "refId": "A",
           "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
-          "rawSql": "SELECT merchant, count() AS transactions FROM fraud.transactions WHERE $__timeFilter(timestamp) GROUP BY merchant ORDER BY transactions DESC",
-          "format": 1,
-          "queryType": "sql"
-        }
-      ],
-      "fieldConfig": { "defaults": {}, "overrides": [] },
-      "options": { "displayMode": "gradient", "orientation": "horizontal" }
-    },
-    {
-      "id": 8,
-      "type": "table",
-      "title": "Recent High-Risk Transactions",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
-      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
-          "rawSql": "SELECT timestamp AS time, user_id, amount, merchant, location, round(fraud_probability, 4) AS fraud_probability FROM fraud.transactions WHERE fraud_probability >= 0.51 ORDER BY timestamp DESC LIMIT 50",
-          "format": 1,
+          "rawSql": "SELECT toStartOfMinute(timestamp) AS time, countIf(actual_label = 1) / 60.0 AS confirmed_frauds_per_sec FROM fraud.evaluation WHERE $__timeFilter(timestamp) GROUP BY time ORDER BY time",
+          "format": 0,
           "queryType": "sql"
         }
       ],
       "fieldConfig": { "defaults": {}, "overrides": [] },
       "options": {}
+    },
+    {
+      "id": 14,
+      "type": "barchart",
+      "title": "Fraud Probability Distribution",
+      "description": "Histogram of predicted fraud_probability across evaluated transactions, bucketed in tenths.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 18 },
+      "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "grafana-clickhouse-datasource", "uid": "PDEE91DDB90597936" },
+          "rawSql": "SELECT toString(floor(fraud_probability * 10) / 10) AS bucket, count() AS count FROM fraud.evaluation WHERE $__timeFilter(timestamp) GROUP BY bucket ORDER BY bucket",
+          "format": 1,
+          "queryType": "sql"
+        }
+      ],
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "xField": "bucket", "orientation": "vertical" }
     }
   ]
 }

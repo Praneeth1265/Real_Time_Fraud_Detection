@@ -53,53 +53,58 @@ This single project touches almost every buzzword a data/backend/ML-adjacent int
 
 ```mermaid
 flowchart LR
-    subgraph Ingestion
+    subgraph Ingestion["Ingestion — 2 instances<br/>(disjoint user_id ranges)"]
         P[Producer<br/>faker_producer.py]
     end
 
-    subgraph Streaming
-        K[(Kafka Topic:<br/>transactions)]
-        Z[ZooKeeper]
+    subgraph Kafka["Kafka Cluster — 2 brokers (kafka, kafka-2)<br/>every topic: 2 partitions, replication_factor=2"]
+        RAW[["transactions.raw"]]
+        FEAT[["transactions.features"]]
+        GT[["ground_truth"]]
     end
 
-    subgraph Processing
-        C[Consumer<br/>transactions_consumer.py]
-        R[(Redis<br/>per-user state)]
+    subgraph FeatureLayer["Feature Service — 2 instances<br/>(consumer group)"]
+        FS[compute_features<br/>common/features.py]
+    end
+    R[(Redis<br/>per-user state)]
+
+    subgraph MLLayer["ML Inference Service — 2 instances<br/>(consumer group)"]
+        ML[XGBoost scorer<br/>in-process, no REST hop]
     end
 
-    subgraph ML
-        M[ML Service<br/>FastAPI + XGBoost]
+    subgraph EvalLayer["Evaluation Service — 2 instances<br/>(consumer group)"]
+        EV[Ground-truth reconciliation<br/>TP / FP / FN / TN]
     end
 
-    subgraph Storage
-        CH[(ClickHouse<br/>fraud.transactions)]
-    end
+    CH[(ClickHouse<br/>fraud.predictions<br/>fraud.evaluation)]
+    G[Grafana Dashboard]
 
-    subgraph Visualization
-        G[Grafana Dashboard]
-    end
-
-    P -->|JSON transaction| K
-    K -->|consume| C
-    C <-->|read/write user history| R
-    C -->|POST /predict features| M
-    M -->|fraud probability| C
-    C -->|batch INSERT| CH
-    G -->|SQL queries| CH
-    Z -.manages metadata for.- K
+    P -->|transaction JSON| RAW
+    P -.->|delayed confirmation| GT
+    RAW --> FS
+    FS <-->|read/write per-user history| R
+    FS --> FEAT
+    FEAT --> ML
+    ML -->|batch INSERT| CH
+    GT --> EV
+    CH -.->|lookup prediction by tx_id| EV
+    EV -->|batch INSERT| CH
+    CH -->|SQL queries| G
 ```
+*(ZooKeeper coordinates the 2 Kafka brokers — metadata/leader-election only, not part of the data path, so omitted above to keep the flow readable. It remains a single instance and a separate point of failure from the brokers themselves; see §6.)*
 
 ### 3.2 Component responsibilities (the "who does what")
 
-| Service | Container name | Responsibility |
+| Service | Container name(s) | Responsibility |
 |---|---|---|
-| `producer` | `producer` | Continuously invents realistic transactions (user, amount, merchant, location, GPS coordinates, timestamp) at ~50/second and publishes them to the Kafka `transactions` topic. Occasionally injects "impossible travel" fraud patterns. |
-| `zookeeper` | `zookeeper` | Keeps track of Kafka broker metadata (which broker is the leader, topic configs, etc.) |
-| `kafka` | `kafka` | Durable, ordered queue for transactions between the producer and the consumer |
+| `producer` | `producer-1`, `producer-2` | Each invents realistic transactions (user, amount, merchant, location, GPS coordinates, timestamp) at 12 TX/sec for a disjoint slice of simulated user IDs, publishes to `transactions.raw`, and publishes a delayed ground-truth confirmation to `ground_truth`. Injects fraud at a 2% rate. |
+| `zookeeper` | `zookeeper` | Coordinates Kafka broker metadata (leader election, topic configs). Single instance — a separate point of failure from the brokers themselves. |
+| `kafka` | `kafka`, `kafka-2` | Two-broker Kafka cluster; every topic has `replication_factor=2`, so losing either broker doesn't lose data or availability (verified — see §6) |
 | `redis` | `redis` | Stores per-user rolling state: running mean/variance of spend, last known location/time, transaction counts, location/merchant frequency counts |
-| `consumer` | `consumer` | The core "brain" of the pipeline: reads each transaction, computes 29 ML features using Redis state, asks the ML service for a fraud probability, then batch-writes the fully-enriched row to ClickHouse |
-| `ml_service` | `ml_service` | Loads the pre-trained XGBoost model at startup and exposes it over HTTP (`POST /predict`) — pure model serving, no business logic |
-| `clickhouse` | `clickhouse` | Stores every scored transaction permanently, in a schema optimized for fast aggregate queries |
+| `feature_service` | `feature-service-1`, `feature-service-2` | Consumer group reading `transactions.raw`: computes 29 ML features per transaction using Redis state (`common/features.py`, shared with the offline dataset generator), publishes the enriched record to `transactions.features` |
+| `ml_service` | `ml-service-1`, `ml-service-2` | Consumer group reading `transactions.features`: scores each with the XGBoost model **in-process** (no HTTP hop), writes `(probability, predicted_label)` to ClickHouse's `fraud.predictions` |
+| `evaluation_service` | `evaluation-service-1`, `evaluation-service-2` | Consumer group reading `ground_truth`: looks up the matching prediction in ClickHouse by `transaction_id`, classifies it TP/FP/FN/TN, writes the result to `fraud.evaluation` — this is what makes live precision/recall measurable |
+| `clickhouse` | `clickhouse` | Stores every scored + evaluated transaction permanently, in a schema optimized for fast aggregate queries |
 | `grafana` | `grafana` | Auto-provisioned dashboard querying ClickHouse every 10 seconds to show live stats and charts |
 
 ### 3.3 Why a pipeline instead of "one script that does everything"?
@@ -112,16 +117,14 @@ This is a classic **separation of concerns** interview talking point:
 
 ### 3.4 Data flow — concrete walkthrough of a single transaction
 
-1. Producer creates: `{"user_id": 104, "amount": 414.39, "merchant": "BestBuy", "location": "NY", "lat": 40.7128, "lon": -74.006, "timestamp": "2026-07-19T17:23:34"}` and sends it as JSON to Kafka.
-2. Consumer picks it up from the `transactions` topic.
-3. Consumer fetches user 104's stored history from Redis (e.g., "average spend $320, last seen in NY 3 hours ago, home location NY").
-4. Consumer computes features: is this amount unusually high for this user? (**z-score**: a statistics measure of how many standard deviations a value is from the mean) Is the travel speed since the last transaction physically impossible? Is this a new merchant for them? Is it night time? Etc. — 29 features total.
-5. Consumer calls `ml_service`'s `/predict` endpoint with those 29 features as JSON.
-6. `ml_service` runs the XGBoost model and returns something like `{"probability": 0.18, "prediction": 0, "threshold": 0.51}`.
-7. Consumer updates Redis with this transaction's info (new running average, new last-seen location, etc.) so the *next* transaction from user 104 sees fresh history.
-8. Consumer adds the full row (original transaction + all 29 features + fraud probability) to an in-memory batch.
-9. Once the batch reaches 100 rows (or 2 seconds pass, whichever first), the consumer bulk-inserts into ClickHouse's `fraud.transactions` table.
-10. Grafana, refreshing every 10 seconds, re-runs its SQL queries against ClickHouse and the charts update.
+1. A producer creates: `{"user_id": 104, "amount": 414.39, "merchant": "BestBuy", "location": "NY", "lat": 40.7128, "lon": -74.006, "timestamp": "2026-07-19T17:23:34", "transaction_id": "..."}` and publishes it to `transactions.raw`. It also schedules a delayed ground-truth confirmation (5-30s later) to the `ground_truth` topic, simulating how real fraud confirmations lag behind the transaction itself.
+2. A `feature-service` instance (one of 2, in `feature-service-group`) picks it up.
+3. It fetches user 104's stored history from Redis (e.g., "average spend $320, last seen in NY 3 hours ago, home location NY") and computes 29 features — is this amount unusually high for this user? (**z-score**: a statistics measure of how many standard deviations a value is from the mean) Is the travel speed since the last transaction physically impossible? Is this a new merchant? Is it night time? Etc.
+4. It updates Redis with this transaction's info (new running average, new last-seen location, etc.) so the *next* transaction from user 104 sees fresh history, then publishes the enriched record to `transactions.features`.
+5. An `ml-service` instance (one of 2, in `ml-service-group`) picks it up, runs the XGBoost model **in-process** (no HTTP hop — the model is loaded once at startup), and gets `{"probability": 0.18, "predicted_label": 0}` using the metadata-configured threshold.
+6. It batches scored rows (100 rows or 2 seconds, whichever first) and bulk-inserts into ClickHouse's `fraud.predictions` table.
+7. Separately, once the delayed ground-truth message for this transaction arrives on `ground_truth`, an `evaluation-service` instance looks up the matching row in `fraud.predictions` by `transaction_id`, classifies it TP/FP/FN/TN against the actual label, and inserts the result into `fraud.evaluation` — this closed loop is what makes live precision/recall measurable at all (see `THRESHOLD_RECALIBRATION_REPORT.md`).
+8. Grafana, refreshing every 10 seconds, re-runs its SQL queries against ClickHouse and the charts update.
 
 ---
 
@@ -191,7 +194,7 @@ whichever happens first. This is a standard **micro-batching** pattern used to t
 ### 4.4 ML Service — `ml_service/app.py`
 
 - A minimal FastAPI app with two endpoints:
-  - `POST /predict` — accepts a JSON body matching the `Transaction` Pydantic model (Pydantic: a Python library for declaring and validating the shape/types of data) with all 29 features, builds an XGBoost **DMatrix** (XGBoost's optimized internal data structure for feeding data to the model), runs `model.predict()`, and compares the resulting probability against a pre-computed **optimal threshold** (0.51, chosen during training — see below) to produce a binary `prediction` (0 or 1) alongside the raw `probability`.
+  - `POST /predict` — accepts a JSON body matching the `Transaction` Pydantic model (Pydantic: a Python library for declaring and validating the shape/types of data) with all 29 features, builds an XGBoost **DMatrix** (XGBoost's optimized internal data structure for feeding data to the model), runs `model.predict()`, and compares the resulting probability against a pre-computed **optimal threshold** (currently 0.7867, recalibrated for live fraud prevalence — see 4.5) to produce a binary `prediction` (0 or 1) alongside the raw `probability`.
   - `GET /health` — used by Docker's `healthcheck` and by the consumer's startup wait-loop.
 - The model file (`fraud_model.json`) and metadata (`model_metadata.json`) are mounted into the container as **read-only volumes** rather than baked into the image — meaning you can swap in a retrained model by replacing the file on the host, without rebuilding the Docker image.
 - Loads once at process startup (not per-request) — model loading is the expensive part, so it's done exactly once and reused for every request.
@@ -212,20 +215,22 @@ The model itself was trained **outside this repository's runtime path** — this
 - *Location:* `location_mismatch_home`, `location_mismatch_last`, `distance_from_last_tx`, `distance_from_last_tx_log`, `travel_speed`, `travel_speed_log`, `is_impossible_travel`, `location_frequency`, `is_new_location`
 - *Merchant:* `merchant_risk`, `merchant_frequency`, `is_new_merchant`
 
-**Reported performance** (from `model_metadata.json`, on the original held-out test set):
+**Reported performance** (from `model_metadata.json`, on the original held-out test set, which has a **13% fraud rate** — see the calibration note below for why that number matters):
 
 | Metric | Value | Plain meaning |
 |---|---|---|
 | **AUC** (Area Under the ROC Curve) | 0.842 | Probability the model ranks a random fraud case as riskier than a random legit case; 0.5 = coin flip, 1.0 = perfect |
 | **AP** (Average Precision) | 0.460 | Similar to AUC but more informative on imbalanced data — summarizes the precision/recall curve |
 | **Optimal F1** | 0.432 | Harmonic mean of precision and recall at the chosen threshold — balances "catching fraud" vs "not crying wolf" |
-| **Precision** | 0.295 | Of everything flagged as fraud, ~29.5% actually was fraud |
+| **Precision** | 0.295 | Of everything flagged as fraud, ~29.5% actually was fraud — **on the 13%-fraud test set only, see below** |
 | **Recall** | 0.806 | Of all actual fraud, the model catches ~80.6% of it |
 | **False alarm rate** | 0.292 | ~29.2% of legitimate transactions get incorrectly flagged |
 
 **Independently reproduced (not just taken on faith):** the model file was reloaded and re-scored against the full 500k-row `fraud_dataset_5l.csv` (fraud rate 13.1%) using `sklearn` metrics, outside of this project's runtime. Results matched the reported test metrics closely — **AUC 0.844, F1 0.434, precision 0.296, recall 0.816, false alarm rate 0.293** — confirming the shipped model file and metadata are internally consistent and the reported numbers are genuine, not just aspirational. (Caveat: this re-scoring ran over the same data the model may have been trained on, since the original train/test split indices weren't shipped with the repo — so treat it as a *consistency check*, not an independent validation. `model_metadata.json`'s numbers remain the trustworthy out-of-sample benchmark.)
 
-**Why this precision/recall trade-off is a deliberate, defensible choice (great interview talking point):** in fraud detection, missing real fraud (a **false negative**) is usually far more costly than a false alarm (a **false positive**) — a false alarm might mean a small manual review, while a missed fraud means real money lost. The `scale_pos_weight` and the `optimal_threshold=0.51` (rather than the "default" 0.5) were tuned to **favor recall over precision** — catch 80% of fraud even if it means a decent chunk of false alarms. This is the standard trade-off framing to bring up if asked "why not just get 99% accuracy?" — with fraud this rare, a model that predicts "never fraud" would already be >95% accurate and completely useless; **accuracy is the wrong metric** for imbalanced problems like this, which is why AUC/precision/recall/F1 are used instead.
+**Why this precision/recall trade-off is a deliberate, defensible choice (great interview talking point):** in fraud detection, missing real fraud (a **false negative**) is usually far more costly than a false alarm (a **false positive**) — a false alarm might mean a small manual review, while a missed fraud means real money lost. The `scale_pos_weight` and the chosen decision threshold were tuned to **favor recall over precision** — catch a high fraction of fraud even if it means a decent chunk of false alarms. This is the standard trade-off framing to bring up if asked "why not just get 99% accuracy?" — with fraud this rare, a model that predicts "never fraud" would already be >95% accurate and completely useless; **accuracy is the wrong metric** for imbalanced problems like this, which is why AUC/precision/recall/F1 are used instead.
+
+**⚠️ Threshold recalibration — training prevalence vs. live prevalence (important, and a great "what did you debug" interview story):** `dataset_generator.py` injects synthetic fraud at a 5% base rate, which (after probabilistic labeling/noise) yields the ~13% `fraud_label` rate seen above. `producer/faker_producer.py`, which simulates *live* traffic, injects fraud at only **2%**. Recall is prevalence-invariant (it's computed only over the positive class), so it transfers from the 13%-fraud test set to the 2%-fraud live stream basically unchanged. **Precision is not** — it depends on how many legitimate transactions surround each fraud case, so the same model, at the same threshold, looks dramatically worse on precision once deployed against rarer real-world fraud. Concretely, the original threshold (0.51) reprojects via Bayes' theorem (`precision(π) = π·TPR / (π·TPR + (1-π)·FPR)`) from 29.5% precision at 13% prevalence down to **~5.4% precision at 2% prevalence** — matching what was actually observed live. The model itself (`fraud_detection_model.json`, AUC 0.842) was never retrained to fix this — only `optimal_threshold` in `model_metadata.json` was recalibrated (via `scripts/recalibrate_threshold.py`) to **0.7867**, chosen as the threshold maximizing F1 subject to a 10% precision floor *at the real 2% live prevalence*. That trades recall down to ~32% for precision up to ~14% — both figures under `model_metadata.json` → `performance_live_2pct`. Full derivation and proofs: `THRESHOLD_RECALIBRATION_REPORT.md`.
 
 **✅ Train/serve parity (previously a bug, now fixed):** the live consumer's feature engineering (`consumer/transactions_consumer.py`) was rewritten to mirror `dataset_generator.py`'s formulas exactly — `merchant_risk`'s 3-level scale, the `is_night`/`is_round_amount`/`is_very_high` thresholds, the 720-hour and 20,000 km cold-start/cap constants, the 800 km/h impossible-travel threshold, the "history excludes the current transaction" convention for counts/frequencies, and the evolving (mode-based) `home_location` — are now identical on both sides. This was verified by rebuilding the consumer and inspecting live ClickHouse rows (e.g. `merchant_risk` now cleanly maps `Casino`/`Foreign_Site` → 3, `Luxury_Store`/`Electronics_Hub` → 2, everything else → 1, with no stray 0/1 values).
 
@@ -268,7 +273,7 @@ PARTITION BY toYYYYMM(timestamp);
   - 4 stat tiles: Total Transactions, Flagged as Fraud, Fraud Rate %, Avg Fraud Probability
   - 2 time-series charts: Transactions per Minute, Avg Fraud Probability per Minute
   - 1 bar gauge: Transactions by Merchant
-  - 1 table: Recent High-Risk Transactions (fraud_probability ≥ 0.51, i.e., the model's tuned threshold)
+  - 1 table: Recent High-Risk Transactions (fraud_probability ≥ 0.7867, i.e., the model's tuned threshold — see 4.5)
 - Auto-refreshes every 10 seconds, giving the "live" feel.
 
 ### 4.9 Docker Compose — how it all gets wired together
@@ -314,7 +319,7 @@ Being able to critique your own project's rough edges is one of the strongest si
 3. **No authentication/security** — Grafana uses default `admin/admin`, Kafka/Redis/ClickHouse have no auth enabled. Fine for a local demo, not for anything internet-facing.
 4. **No automated tests** — no unit tests for feature computation, no integration tests for the pipeline. Would add `pytest` tests for `compute_features()` (easy to unit test in isolation) and a smoke test that runs the whole Docker Compose stack in CI.
 5. **No model retraining/versioning pipeline** — the model is a static file; a production system would have a scheduled retraining job and a model registry (e.g., MLflow) to track versions and roll back if a new model underperforms.
-6. **Single point of failure everywhere** — one Kafka broker, one Redis instance, one ClickHouse node — no replication, so any one container dying loses that service until it restarts.
+6. **Single point of failure — partially addressed for Kafka, still open elsewhere.** Kafka now runs 2 brokers (`kafka`, `kafka-2`) with every topic (including the internal `__consumer_offsets`) at `replication_factor=2`, and all producers/consumers bootstrap against both brokers (`KAFKA_BROKER: kafka:9092,kafka-2:9092`). Verified by actually killing `kafka-2` mid-run: produce/consume (including via a real consumer group) kept working against the surviving broker with zero message loss. ZooKeeper (the coordination layer Kafka depends on), Redis, and ClickHouse remain single instances with no replication — any one of *those* dying still takes that service down until it restarts. Note this is running on a memory-constrained host (~3.8GB RAM) where a second Kafka JVM broker measurably tightens headroom (swap usage rose from ~1.4GB to ~2.3GB with the full 15-container stack up) — worth checking available memory before adding further replicas.
 7. **Feature engineering is still duplicated** (one implementation in `dataset_generator.py`, one in `transactions_consumer.py`) even though they're now kept manually in sync — the two were carefully aligned by hand, but that's fragile long-term. The more maintainable fix would be a single shared feature-engineering module imported by both the offline data generator and the live consumer, so there is exactly one implementation to change when a feature definition needs to evolve.
 
 ---

@@ -1,4 +1,2 @@
 kafka-python
-xgboost
-numpy
 clickhouse-connect

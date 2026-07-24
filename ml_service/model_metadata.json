@@ -30,7 +30,7 @@
         "merchant_frequency",
         "is_new_merchant"
     ],
-    "optimal_threshold": 0.5100000000000001,
+    "optimal_threshold": 0.7867072224617004,
     "scale_pos_weight": 6.658336098843591,
     "training_params": {
         "max_depth": 6,
@@ -57,5 +57,20 @@
         "optimal_precision": 0.2952058218987834,
         "fraud_detection_rate": 0.808939393939394,
         "false_alarm_rate": 0.2917511520737327
+    },
+    "performance_live_2pct": {
+        "threshold": 0.7867072224617004,
+        "precision": 0.13871203671871063,
+        "recall": 0.3207121172827264,
+        "f1": 0.19366256911480464,
+        "prevalence_assumed": 0.02,
+        "precision_floor_used": 0.1,
+        "selection_rule": "max F1 subject to precision >= 0.1",
+        "old_threshold_under_same_prevalence": {
+            "threshold": 0.5099958181381226,
+            "precision": 0.053800597164929874,
+            "recall": 0.8162346874952328,
+            "f1": 0.1009474314162472
+        }
     }
 }

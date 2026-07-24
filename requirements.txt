@@ -1,9 +1,0 @@
-kafka-python
-redis
-faker
-clickhouse-connect
-aiokafka
-httpx
-fastapi
-uvicorn
-pydantic

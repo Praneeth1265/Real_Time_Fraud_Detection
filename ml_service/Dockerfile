@@ -1,15 +1,17 @@
-FROM python:3.10
+FROM python:3.10-slim
+
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Copy requirements first (better caching)
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy model files and service code
-COPY app.py .
-COPY fraud_detection_model.json .
-COPY model_metadata.json .
+COPY ml_inference_service.py .
 
-# Run FastAPI with uvicorn
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+# fraud_model.json and model_metadata.json are volume-mounted at runtime
+# (see docker-compose.yml) rather than baked in, so a retrained model or a
+# recalibrated threshold can be picked up with a container restart, not a
+# rebuild.
+
+CMD ["python", "ml_inference_service.py"]

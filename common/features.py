@@ -1,27 +1,5 @@
-import json
 import math
-import time
 from datetime import datetime
-
-import httpx
-import redis
-from kafka import KafkaConsumer
-from kafka.errors import KafkaError
-import clickhouse_connect
-
-KAFKA_BROKER = "kafka:9092"
-TOPIC_NAME = "transactions"
-
-REDIS_HOST = "redis"
-REDIS_PORT = 6379
-
-CLICKHOUSE_HOST = "clickhouse"
-CLICKHOUSE_PORT = 8123
-
-ML_SERVICE_URL = "http://ml_service:8000/predict"
-
-BATCH_SIZE = 100
-BATCH_INTERVAL = 2.0  # seconds
 
 # These constants and the feature formulas below intentionally mirror
 # Syn_dataset/dataset_generator.py exactly, so live features match what the
@@ -55,60 +33,6 @@ def haversine(lat1, lon1, lat2, lon2):
     dlambda = math.radians(lon2 - lon1)
     a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
-
-def connect_kafka():
-    for _ in range(15):
-        try:
-            return KafkaConsumer(
-                TOPIC_NAME,
-                bootstrap_servers=KAFKA_BROKER,
-                value_deserializer=lambda v: json.loads(v.decode("utf-8")),
-                auto_offset_reset="latest",
-                enable_auto_commit=True,
-                group_id="fraud-consumer",
-            )
-        except KafkaError:
-            print("Kafka not ready, retrying...", flush=True)
-            time.sleep(2)
-    raise RuntimeError("Kafka not available")
-
-
-def connect_redis():
-    for _ in range(15):
-        try:
-            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-            r.ping()
-            return r
-        except redis.exceptions.ConnectionError:
-            print("Redis not ready, retrying...", flush=True)
-            time.sleep(2)
-    raise RuntimeError("Redis not available")
-
-
-def connect_clickhouse():
-    for _ in range(15):
-        try:
-            client = clickhouse_connect.get_client(host=CLICKHOUSE_HOST, port=CLICKHOUSE_PORT)
-            client.ping()
-            return client
-        except Exception:
-            print("ClickHouse not ready, retrying...", flush=True)
-            time.sleep(2)
-    raise RuntimeError("ClickHouse not available")
-
-
-def wait_for_ml_service(http_client):
-    for _ in range(15):
-        try:
-            resp = http_client.get("http://ml_service:8000/health")
-            if resp.status_code == 200:
-                return
-        except httpx.HTTPError:
-            pass
-        print("ml_service not ready, retrying...", flush=True)
-        time.sleep(2)
-    raise RuntimeError("ml_service not available")
 
 
 def merchant_risk_level(merchant):
@@ -172,7 +96,10 @@ def compute_features(r, tx):
     is_night = int(hour >= 23 or hour <= 5)
 
     if last_ts is not None:
-        hours_since_raw = (epoch - float(last_ts)) / 3600
+        # Floored at 0 as a defensive guard against out-of-order arrivals
+        # (e.g. clock skew between producer instances) -- log1p() would
+        # otherwise raise on a negative delta.
+        hours_since_raw = max((epoch - float(last_ts)) / 3600, 0.0)
         hours_since_last_tx = min(hours_since_raw, MAX_HOURS_CAP)
         hours_since_last_tx_log = math.log1p(hours_since_raw)
         is_rapid_tx = int(hours_since_raw < RAPID_TX_HOURS)
@@ -279,56 +206,3 @@ def compute_features(r, tx):
     })
 
     return features
-
-
-def main():
-    http_client = httpx.Client(timeout=5.0)
-    wait_for_ml_service(http_client)
-
-    r = connect_redis()
-    ch_client = connect_clickhouse()
-    consumer = connect_kafka()
-
-    print("Consumer started, waiting for transactions...", flush=True)
-
-    buffer = []
-    columns = ["user_id", "amount", "merchant", "location", "lat", "lon", "timestamp"] + \
-        [c for c in FEATURE_COLUMNS if c != "amount"] + ["fraud_probability"]
-
-    last_flush = time.time()
-
-    def flush():
-        nonlocal buffer, last_flush
-        if buffer:
-            ch_client.insert("fraud.transactions", buffer, column_names=columns)
-            print(f"Inserted {len(buffer)} rows into ClickHouse", flush=True)
-            buffer = []
-        last_flush = time.time()
-
-    for msg in consumer:
-        tx = msg.value
-        try:
-            features = compute_features(r, tx)
-
-            predict_payload = {k: features[k] for k in FEATURE_COLUMNS}
-            resp = http_client.post(ML_SERVICE_URL, json=predict_payload)
-            resp.raise_for_status()
-            fraud_probability = resp.json()["probability"]
-
-            row = [
-                tx["user_id"], tx["amount"], tx["merchant"], tx["location"],
-                tx["lat"], tx["lon"], datetime.fromisoformat(tx["timestamp"]),
-            ] + [features[c] for c in FEATURE_COLUMNS if c != "amount"] + [fraud_probability]
-
-            buffer.append(row)
-
-        except Exception as e:
-            print(f"Error processing transaction: {e}", flush=True)
-            continue
-
-        if len(buffer) >= BATCH_SIZE or (time.time() - last_flush) >= BATCH_INTERVAL:
-            flush()
-
-
-if __name__ == "__main__":
-    main()
