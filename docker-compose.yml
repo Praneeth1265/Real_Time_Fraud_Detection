@@ -141,6 +141,7 @@ services:
     build:
       context: ./producer
       dockerfile: Dockerfile
+    image: fraud-producer:latest
     container_name: producer-1
     depends_on:
       kafka-init:
@@ -160,9 +161,7 @@ services:
     restart: unless-stopped
 
   producer-2:
-    build:
-      context: ./producer
-      dockerfile: Dockerfile
+    image: fraud-producer:latest
     container_name: producer-2
     depends_on:
       kafka-init:
@@ -189,6 +188,7 @@ services:
     build:
       context: .
       dockerfile: feature_service/Dockerfile
+    image: fraud-feature-service:latest
     container_name: feature-service-1
     depends_on:
       kafka-init:
@@ -207,9 +207,7 @@ services:
     restart: unless-stopped
 
   feature-service-2:
-    build:
-      context: .
-      dockerfile: feature_service/Dockerfile
+    image: fraud-feature-service:latest
     container_name: feature-service-2
     depends_on:
       kafka-init:
@@ -235,6 +233,7 @@ services:
     build:
       context: ./ml_service
       dockerfile: Dockerfile
+    image: fraud-ml-service:latest
     container_name: ml-service-1
     depends_on:
       kafka-init:
@@ -255,9 +254,7 @@ services:
     restart: unless-stopped
 
   ml-service-2:
-    build:
-      context: ./ml_service
-      dockerfile: Dockerfile
+    image: fraud-ml-service:latest
     container_name: ml-service-2
     depends_on:
       kafka-init:
@@ -285,6 +282,7 @@ services:
     build:
       context: ./evaluation_service
       dockerfile: Dockerfile
+    image: fraud-evaluation-service:latest
     container_name: evaluation-service-1
     depends_on:
       kafka-init:
@@ -302,9 +300,7 @@ services:
     restart: unless-stopped
 
   evaluation-service-2:
-    build:
-      context: ./evaluation_service
-      dockerfile: Dockerfile
+    image: fraud-evaluation-service:latest
     container_name: evaluation-service-2
     depends_on:
       kafka-init:
